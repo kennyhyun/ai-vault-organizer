@@ -1,0 +1,10 @@
+{
+  "id": "ai-vault-organizer",
+  "name": "AI Vault Organizer",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Daily vault organization using kiro-cli AI. Schedules organize.sh to classify, summarize, and restructure your notes automatically.",
+  "author": "kennyhyun",
+  "authorUrl": "https://github.com/kennyhyun",
+  "isDesktopOnly": true
+}

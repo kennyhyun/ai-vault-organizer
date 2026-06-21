@@ -1,0 +1,7 @@
+[Unit]
+Description=Obsidian Daily Organizer
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash {{ORGANIZE_SCRIPT}}
+Environment=OBSIDIAN_VAULT={{OBSIDIAN_VAULT}}
