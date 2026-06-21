@@ -93,36 +93,52 @@ build_prompt() {
     template="$(cat "${SCRIPT_DIR}/prompt-template.txt")" || { log_error "prompt-template.txt 읽기 실패"; return 1; }
     PROMPT="${template/\{\{VAULT_TREE\}\}/${vault_tree}}"
     PROMPT="${PROMPT/\{\{CHANGED_FILES_CONTENT\}\}/${files_content}}"
+    # wordcount threshold 초과 파일 목록
+    local word_threshold="${WORD_THRESHOLD:-500}"
+    local long_files_content="(없음)"
+    local long_files=()
+    if [ -f "${SCRIPT_DIR}/wordcount.sh" ]; then
+        for f in "${CHANGED_FILES[@]}"; do
+            local wc
+            wc=$(bash "${SCRIPT_DIR}/wordcount.sh" "${OBSIDIAN_VAULT}/${f}" 2>/dev/null || echo 0)
+            [ "$wc" -gt "$word_threshold" ] && long_files+=("- ${f} (${wc} words)")
+        done
+        [ "${#long_files[@]}" -gt 0 ] && long_files_content="$(printf '%s\n' "${long_files[@]}")"
+    fi
+
     PROMPT="${PROMPT/\{\{TEMPLATES_CONTENT\}\}/${templates_content}}"
+    PROMPT="${PROMPT/\{\{LONG_FILES_CONTENT\}\}/${long_files_content}}"
+    PROMPT="${PROMPT/\{\{WORD_THRESHOLD\}\}/${word_threshold}}"
 }
 
-run_kiro() {
+run_chat() {
     if [ "${KIRO_DRY_RUN:-}" = "1" ]; then
         log "- [DRY RUN] 프롬프트 길이: ${#PROMPT} chars"
         return 0
     fi
 
-    local kiro_output kiro_exit
-    kiro_output="$(kiro-cli chat --no-interactive --trust-all-tools "${PROMPT}" 2>&1)"
-    kiro_exit=$?
+    local output exit_code
+    output="$(echo "${PROMPT}" | bash "${SCRIPT_DIR}/chat.sh" 2>&1)"
+    exit_code=$?
 
-    if [ $kiro_exit -ne 0 ]; then
-        log_error "kiro-cli 실패 (exit ${kiro_exit}): ${kiro_output}"
+    if [ $exit_code -ne 0 ]; then
+        log_error "chat.sh 실패 (exit ${exit_code}): ${output}"
         return 1
     fi
 
-    echo "${kiro_output}" | sed 's/\x1b\[[0-9;]*m//g' | sed -n '/### 처리된 파일/,/### 오류/p' >> "${LOG_FILE}"
+    echo "${output}" | sed 's/\x1b\[[0-9;]*m//g' \
+        | sed -n '/### 처리된 파일/,/### 오류/p' >> "${LOG_FILE}"
 }
 
-run_kiro_with_retry() {
-    if ! run_kiro; then
+run_chat_with_retry() {
+    if ! run_chat; then
         log "- 배치 분할 재시도 중..."
         local mid=$(( ${#CHANGED_FILES[@]} / 2 ))
         local first=("${CHANGED_FILES[@]:0:${mid}}")
         local second=("${CHANGED_FILES[@]:${mid}}")
 
-        CHANGED_FILES=("${first[@]}"); build_prompt; run_kiro || log_error "배치 1/2 실패"
-        CHANGED_FILES=("${second[@]}"); build_prompt; run_kiro || log_error "배치 2/2 실패"
+        CHANGED_FILES=("${first[@]}"); build_prompt; run_chat || log_error "배치 1/2 실패"
+        CHANGED_FILES=("${second[@]}"); build_prompt; run_chat || log_error "배치 2/2 실패"
     fi
 }
 
@@ -152,5 +168,5 @@ START_TIME=$(date +%s)
 collect_changed_files
 build_prompt || { log "### 오류"; log "- 프롬프트 생성 실패 (prompt-template.txt 없음)"; exit 1; }
 log "### 처리된 파일"
-run_kiro_with_retry
+run_chat_with_retry
 commit_and_push

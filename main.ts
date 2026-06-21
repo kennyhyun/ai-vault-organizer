@@ -1,25 +1,34 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, normalizePath, setIcon } from "obsidian";
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, normalizePath, setIcon } from "obsidian";
 import { spawn } from "child_process";
-import { dirname } from "path";
+import { existsSync } from "fs";
 
 interface VaultOrganizerSettings {
 	scriptPath: string;
-	kiroCliPath: string;
 	vaultOverride: string;
 	scheduledTimeEnabled: boolean;
 	scheduledTime: string;
 	intervalEnabled: boolean;
 	intervalMinutes: number;
+	chatScriptContent: string;
+	wordThreshold: number;
+	gitBashPath: string;
 }
+
+const DEFAULT_CHAT_SCRIPT = `#!/usr/bin/env bash
+PROMPT="$(cat)"
+kiro-cli chat --no-interactive --trust-all-tools "\${PROMPT}"
+`;
 
 const DEFAULT_SETTINGS: VaultOrganizerSettings = {
 	scriptPath: "",
-	kiroCliPath: "kiro-cli",
 	vaultOverride: "",
 	scheduledTimeEnabled: true,
 	scheduledTime: "06:00",
 	intervalEnabled: false,
 	intervalMinutes: 60,
+	chatScriptContent: DEFAULT_CHAT_SCRIPT,
+	wordThreshold: 500,
+	gitBashPath: "",
 };
 
 class VaultOrganizerSettingTab extends PluginSettingTab {
@@ -44,20 +53,57 @@ class VaultOrganizerSettingTab extends PluginSettingTab {
 				.onChange(async v => { this.plugin.settings.scriptPath = v; await this.plugin.saveSettings(); }));
 
 		new Setting(containerEl)
-			.setName("kiro-cli 경로")
-			.setDesc("PATH에 없을 경우 절대 경로 지정")
-			.addText(t => t
-				.setPlaceholder("kiro-cli")
-				.setValue(this.plugin.settings.kiroCliPath)
-				.onChange(async v => { this.plugin.settings.kiroCliPath = v; await this.plugin.saveSettings(); }));
-
-		new Setting(containerEl)
 			.setName("Vault 경로 override")
 			.setDesc("비워두면 현재 vault 경로 사용")
 			.addText(t => t
 				.setPlaceholder("")
 				.setValue(this.plugin.settings.vaultOverride)
 				.onChange(async v => { this.plugin.settings.vaultOverride = v; await this.plugin.saveSettings(); }));
+
+		new Setting(containerEl).setName("AI 백엔드").setHeading();
+
+		const chatSetting = new Setting(containerEl)
+			.setName("chat.sh 내용")
+			.setDesc("stdin으로 프롬프트 받고 stdout으로 결과 출력. 변경 후 blur 시 chat.sh에 저장.");
+		const textarea = chatSetting.controlEl.createEl("textarea");
+		textarea.value = this.plugin.settings.chatScriptContent;
+		textarea.rows = 7;
+		textarea.style.cssText = "width:100%;font-family:monospace;font-size:12px;";
+		textarea.addEventListener("change", async () => {
+			this.plugin.settings.chatScriptContent = textarea.value;
+			await this.plugin.saveSettings();
+			await this.plugin.saveChatScript();
+		});
+
+		new Setting(containerEl).setName("파일 분할").setHeading();
+
+		new Setting(containerEl)
+			.setName("단어 수 임계값")
+			.setDesc("초과 시 AI에게 분할 권장 (기본: 500)")
+			.addText(t => t
+				.setPlaceholder("500")
+				.setValue(String(this.plugin.settings.wordThreshold))
+				.onChange(async v => {
+					const n = parseInt(v);
+					if (!isNaN(n) && n > 0) {
+						this.plugin.settings.wordThreshold = n;
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		if (process.platform === "win32") {
+			new Setting(containerEl).setName("Windows").setHeading();
+			new Setting(containerEl)
+				.setName("Git Bash 경로")
+				.setDesc("자동 감지 실패 시 입력")
+				.addText(t => t
+					.setPlaceholder("C:\\Program Files\\Git\\bin\\bash.exe")
+					.setValue(this.plugin.settings.gitBashPath)
+					.onChange(async v => {
+						this.plugin.settings.gitBashPath = v;
+						await this.plugin.saveSettings();
+					}));
+		}
 
 		new Setting(containerEl).setName("지정 시각 스케줄").setHeading();
 
@@ -194,6 +240,25 @@ export default class VaultOrganizerPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
+	async saveChatScript(): Promise<void> {
+		const base = (this.app.vault.adapter as any).basePath;
+		const chatPath = normalizePath(base + "/.obsidian/vault-organizer/chat.sh");
+		await this.app.vault.adapter.write(chatPath, this.settings.chatScriptContent);
+	}
+
+	private getShell(): string {
+		if (process.platform !== "win32") return "bash";
+		if (this.settings.gitBashPath && existsSync(this.settings.gitBashPath))
+			return this.settings.gitBashPath;
+		const candidates = [
+			"C:\\Program Files\\Git\\bin\\bash.exe",
+			"C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+			(process.env["ProgramFiles"] ?? "") + "\\Git\\bin\\bash.exe",
+		];
+		for (const p of candidates) if (existsSync(p)) return p;
+		throw new Error("Git Bash not found. Please set Git Bash path in settings.");
+	}
+
 	async runOrganize(): Promise<void> {
 		if (this.isRunning) return;
 		this.isRunning = true;
@@ -206,10 +271,11 @@ export default class VaultOrganizerPlugin extends Plugin {
 		const vaultPath = this.settings.vaultOverride ||
 			(this.app.vault.adapter as any).basePath;
 
-		const env: NodeJS.ProcessEnv = { ...process.env, OBSIDIAN_VAULT: vaultPath };
-		if (this.settings.kiroCliPath !== "kiro-cli") {
-			env.PATH = dirname(this.settings.kiroCliPath) + ":" + (env.PATH ?? "");
-		}
+		const env: NodeJS.ProcessEnv = {
+			...process.env,
+			OBSIDIAN_VAULT: vaultPath,
+			WORD_THRESHOLD: String(this.settings.wordThreshold),
+		};
 
 		const scriptPath = this.settings.scriptPath ||
 			normalizePath(vaultPath + "/.obsidian/vault-organizer/organize.sh");
@@ -217,7 +283,8 @@ export default class VaultOrganizerPlugin extends Plugin {
 		let stderr = "";
 
 		await new Promise<void>((resolve) => {
-			const child = spawn("bash", [scriptPath], { env });
+			const shell = this.getShell();
+			const child = spawn(shell, [scriptPath], { env });
 			child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
 			child.on("close", (code: number | null) => {
 				this.ribbonIconEl.removeClass("vault-organizer-loading");

@@ -9,6 +9,9 @@
 ## 템플릿 파일 목록
 {{TEMPLATES_CONTENT}}
 
+## 분할 권장 파일 ({{WORD_THRESHOLD}}단어 초과)
+{{LONG_FILES_CONTENT}}
+
 ## 지시사항
 1. Dropbox/ 폴더의 파일은:
    - 내용을 읽고 정리·요약해 vault 루트의 주제별 폴더에 새 파일로 저장
